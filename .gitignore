@@ -1,3 +1,5 @@
 __pycache__/scanner_standalone.cpython-312.pyc
 __pycache__/functions_fingerprint_scanner.cpython-312.pyc
 venv/
+build/
+dist/

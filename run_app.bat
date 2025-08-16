@@ -31,7 +31,7 @@ echo.
 echo Starting Desktop Bridge App...
 echo Server will run on: http://127.0.0.1:8080
 echo.
-python http_server_fingerprint_scanner.py
+python http_server_fingerprint_scanner.py %1
 
 echo.
 echo Deactivating virtual environment...

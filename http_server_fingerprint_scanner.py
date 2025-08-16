@@ -43,6 +43,7 @@ class DesktopBridgeLogger:
     def log(level, message):
         """Add log entry"""
         import time
+        import sys
         timestamp = time.strftime("%H:%M:%S")
         log_entry = {
             "timestamp": timestamp,
@@ -55,12 +56,43 @@ class DesktopBridgeLogger:
         if len(app_logs) > MAX_LOGS:
             app_logs.pop(0)
         
-        # Also log to console
-        print(f"[{timestamp}] {level.upper()}: {message}")
+        # Also log to console with immediate flush (if console available)
+        try:
+            print(f"[{timestamp}] {level.upper()}: {message}")
+            if sys.stdout:
+                sys.stdout.flush()  # Force immediate output
+        except (AttributeError, OSError):
+            # No console available (windowed exe), skip console output
+            pass
     
     @staticmethod
     def info(message):
-        DesktopBridgeLogger.log("info", message)
+        # Handle structured data from scanner
+        if isinstance(message, dict):
+            if message.get("type") == "scan_attempt":
+                attempt = message.get("attempt")
+                total = message.get("total")
+                status = message.get("status")
+                display = message.get("display", f"LẦN {attempt}")
+                scan_message = message.get("message", "")
+                
+                # Log the large attempt number
+                DesktopBridgeLogger.log("info", f"{display}")
+                if scan_message:
+                    DesktopBridgeLogger.log(status, scan_message)
+            elif message.get("type") == "enrollment_complete":
+                finger_name = message.get("finger_name")
+                scans = message.get("scans", [])
+                final_quality = message.get("final_quality", 0)
+                
+                DesktopBridgeLogger.log("success", f"🎉 ENROLLMENT COMPLETED: {finger_name}")
+                for scan in scans:
+                    DesktopBridgeLogger.log("success", f"✅ LẦN {scan['attempt']}: Quality {scan['quality']}% ({scan['size']} bytes)")
+                DesktopBridgeLogger.log("success", f"🏆 FINAL QUALITY: {final_quality}%")
+            else:
+                DesktopBridgeLogger.log("info", str(message))
+        else:
+            DesktopBridgeLogger.log("info", message)
     
     @staticmethod
     def success(message):
@@ -81,7 +113,8 @@ DesktopBridgeLogger.info("Desktop Bridge starting...")
 DESKTOP_CONFIG = {
     "host": "127.0.0.1",
     "port": 8080,
-    "debug": False
+    "debug": False,
+    "auto_open_browser": False  # Default: do not auto-open browser
 }
 
 @app.route('/api/test', methods=['GET'])
@@ -211,6 +244,78 @@ def disconnect_scanner():
             "message": f"Error disconnecting scanner: {str(e)}"
         })
 
+@app.route('/api/logs/since', methods=['GET'])
+def get_logs_since():
+    """Get logs since specific timestamp"""
+    global app_logs
+    
+    since = request.args.get('since', '')
+    
+    if not since:
+        return jsonify({
+            "success": True,
+            "logs": app_logs[-5:] if len(app_logs) > 5 else app_logs
+        })
+    
+    # Filter logs since timestamp
+    filtered_logs = []
+    for log in app_logs:
+        if log['timestamp'] > since:
+            filtered_logs.append(log)
+    
+    return jsonify({
+        "success": True,
+        "logs": filtered_logs
+    })
+
+@app.route('/api/fingerprint/test', methods=['POST'])
+def test_fingerprint_enrollment():
+    """Test endpoint to demonstrate 3-scan enrollment process"""
+    global scanner
+    
+    try:
+        data = request.get_json()
+        finger_index = int(data.get('finger_index', 1))  # Default to index finger
+        
+        if not scanner or not scanner.is_connected:
+            return jsonify({
+                "success": False,
+                "message": "Scanner not connected"
+            })
+        
+        finger_name = get_finger_name(finger_index)
+        DesktopBridgeLogger.info(f"🧪 TEST MODE: Starting 3-scan enrollment for {finger_name}")
+        DesktopBridgeLogger.info("This will demonstrate the 3-scan process with colored indicators")
+        
+        # Perform enrollment with detailed logging
+        template_data = scanner.enroll_fingerprint(finger_index)
+        
+        if template_data:
+            quality_score = scanner._calculate_quality_score(template_data)
+            template_b64 = base64.b64encode(template_data).decode('utf-8')
+            
+            return jsonify({
+                "success": True,
+                "message": f"Test enrollment completed for {finger_name}",
+                "template_data": template_b64,
+                "template_size": len(template_data),
+                "finger_index": finger_index,
+                "quality_score": quality_score,
+                "finger_name": finger_name
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "Test enrollment failed"
+            })
+            
+    except Exception as e:
+        DesktopBridgeLogger.error(f"Test enrollment error: {e}")
+        return jsonify({
+            "success": False,
+            "message": f"Test error: {str(e)}"
+        })
+
 @app.route('/api/fingerprint/capture', methods=['POST'])
 def capture_fingerprint():
     """Capture fingerprint"""
@@ -233,23 +338,30 @@ def capture_fingerprint():
                 "message": "Invalid finger index (0-9)"
             })
         
-        DesktopBridgeLogger.info(f"Capturing fingerprint for employee {employee_id}, finger {finger_index}")
+        finger_name = get_finger_name(finger_index)
+        DesktopBridgeLogger.info(f"Starting enrollment for employee {employee_id}, {finger_name} (Index: {finger_index})")
+        DesktopBridgeLogger.info("📷 This will require 3 fingerprint scans for optimal quality")
         
-        # Capture fingerprint
+        # Capture fingerprint using 3-scan enrollment process
         template_data = scanner.enroll_fingerprint(finger_index)
         
         if template_data:
             # Encode to base64
             template_b64 = base64.b64encode(template_data).decode('utf-8')
             
-            DesktopBridgeLogger.success(f"Fingerprint captured successfully: {len(template_data)} bytes")
+            # Calculate quality score
+            quality_score = scanner._calculate_quality_score(template_data)
+            
+            DesktopBridgeLogger.success(f"Fingerprint captured successfully: {len(template_data)} bytes, Quality: {quality_score}%")
             
             return jsonify({
                 "success": True,
                 "message": "Fingerprint captured successfully",
                 "template_data": template_b64,
                 "template_size": len(template_data),
-                "finger_index": finger_index
+                "finger_index": finger_index,
+                "quality_score": quality_score,
+                "quality": quality_score  # Alternative property name
             })
         else:
             logger.error("Failed to capture fingerprint")
@@ -426,6 +538,7 @@ def index():
                 <button class="button success" onclick="initializeScanner()">Initialize Scanner</button>
                 <button class="button danger" onclick="disconnectScanner()">Disconnect Scanner</button>
                 <button class="button primary" onclick="refreshStatus()">Refresh Status</button>
+                <button class="button info" onclick="testEnrollment()">🧪 Test 3-Scan Enrollment</button>
             </div>
             
             <div class="info">
@@ -446,7 +559,10 @@ def index():
                     <li><code>GET /api/scanner/status</code> - Get scanner status</li>
                     <li><code>POST /api/scanner/initialize</code> - Initialize scanner</li>
                     <li><code>POST /api/scanner/disconnect</code> - Disconnect scanner</li>
-                    <li><code>POST /api/fingerprint/capture</code> - Capture fingerprint</li>
+                    <li><code>POST /api/fingerprint/capture</code> - Capture fingerprint (3-scan enrollment)</li>
+                    <li><code>POST /api/fingerprint/test</code> - Test 3-scan enrollment process</li>
+                    <li><code>GET /api/logs</code> - Get recent activity logs</li>
+                    <li><code>GET /api/logs/since?since=timestamp</code> - Get logs since timestamp</li>
                     <li><code>POST /api/sync/attendance_device</code> - Sync to attendance device</li>
                 </ul>
             </div>
@@ -531,6 +647,31 @@ def index():
                     });
             }
             
+            function testEnrollment() {
+                log('🧪 Starting test enrollment process...');
+                fetch('/api/fingerprint/test', { 
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        finger_index: 1  // Test with left index finger
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        log(`✅ Test completed: ${data.message}`);
+                        log(`📊 Quality: ${data.quality_score}%, Size: ${data.template_size} bytes`);
+                    } else {
+                        log(`❌ Test failed: ${data.message}`);
+                    }
+                })
+                .catch(error => {
+                    log('❌ Test error: ' + error);
+                });
+            }
+            
             // Auto-refresh status every 5 seconds
             setInterval(refreshStatus, 5000);
             
@@ -551,14 +692,18 @@ def start_desktop_app():
     print(f"📡 API Base URL: http://{DESKTOP_CONFIG['host']}:{DESKTOP_CONFIG['port']}/api")
     print("=" * 50)
     
-    # Open browser automatically
-    def open_browser():
-        time.sleep(1.5)  # Wait for server to start
-        webbrowser.open(f"http://{DESKTOP_CONFIG['host']}:{DESKTOP_CONFIG['port']}")
-    
-    browser_thread = threading.Thread(target=open_browser)
-    browser_thread.daemon = True
-    browser_thread.start()
+    # Open browser automatically (if enabled)
+    if DESKTOP_CONFIG.get('auto_open_browser', False):
+        def open_browser():
+            time.sleep(1.5)  # Wait for server to start
+            webbrowser.open(f"http://{DESKTOP_CONFIG['host']}:{DESKTOP_CONFIG['port']}")
+        
+        browser_thread = threading.Thread(target=open_browser)
+        browser_thread.daemon = True
+        browser_thread.start()
+        print("🌐 Browser will open automatically...")
+    else:
+        print("💻 Browser auto-open disabled. Visit the URL manually if needed.")
     
     # Start Flask server
     try:
