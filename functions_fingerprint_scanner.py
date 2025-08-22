@@ -169,110 +169,133 @@ class FingerprintScanner:
         
         logger.info(f"Enrollment completed for {finger_name}: {len(templates)} scans, final quality {final_quality}%")
         
-    def _check_dll_architecture(self, dll_path):
-        """Check if DLL architecture matches Python architecture"""
-        try:
-            import platform
-            import struct
-            
-            python_is_64bit = platform.architecture()[0] == '64bit'
-            
-            # Check DLL architecture by reading PE header
-            with open(dll_path, 'rb') as f:
-                # Read DOS header
-                dos_header = f.read(64)
-                if dos_header[:2] != b'MZ':
-                    return True  # Not a PE file, assume compatible
-                
-                # Get PE header offset
-                pe_offset = struct.unpack('<L', dos_header[60:64])[0]
-                f.seek(pe_offset)
-                
-                # Read PE signature and file header
-                pe_sig = f.read(4)
-                if pe_sig != b'PE\x00\x00':
-                    return True  # Not a valid PE file
-                
-                machine_type = struct.unpack('<H', f.read(2))[0]
-                
-                # 0x014c = i386 (32-bit), 0x8664 = x64 (64-bit)
-                dll_is_64bit = machine_type == 0x8664
-                
-                if python_is_64bit != dll_is_64bit:
-                    arch_python = "64-bit" if python_is_64bit else "32-bit"
-                    arch_dll = "64-bit" if dll_is_64bit else "32-bit"
-                    logger.error(f"Architecture mismatch: Python is {arch_python}, DLL is {arch_dll}")
-                    return False
-                
-                return True
-                
-        except Exception as e:
-            logger.warning(f"Could not verify DLL architecture: {e}")
-            return True  # Assume compatible if we can't check
 
     def connect(self) -> bool:
         """Kết nối với thiết bị scanner vân tay"""
+        # Force cleanup any existing connections first
         if self.is_connected:
-            return True
+            self.disconnect()
+            time.sleep(0.5)  # Give time for cleanup
+        
+        # Always cleanup before attempting new connection
+        self._cleanup()
+        time.sleep(0.2)  # Brief delay for resource cleanup
 
         try:
             # Load DLL with priority order
             try:
                 dll_loaded = False
                 dll_path = None
+                searched_paths = []
                 
-                # Priority 1: Application root directory (current working directory)
-                dll_path = os.path.join(os.getcwd(), "libzkfp.dll")
-                if os.path.exists(dll_path):
+                # Priority 1: C:\Windows\SysWOW64 (default folder when installing driver)
+                syswow64_path = os.path.join(os.environ.get('WINDIR', 'C:\\Windows'), 'SysWOW64', 'libzkfp.dll')
+                searched_paths.append(f"1. SysWOW64: {syswow64_path}")
+                if os.path.exists(syswow64_path):
                     try:
-                        self.zkfp = ctypes.windll.LoadLibrary(dll_path)
-                        logger.info(f"✅ Loaded DLL from application root: {dll_path}")
+                        self.zkfp = ctypes.CDLL(syswow64_path)
+                        logger.info(f"✅ Loaded DLL from SysWOW64: {syswow64_path}")
                         dll_loaded = True
                     except Exception as e:
-                        logger.warning(f"Failed to load from application root: {e}")
+                        logger.warning(f"Failed to load from SysWOW64: {e}")
                 
-                # Priority 2: Use SCANNER_CONFIG['dll_path'] (working code)
+                # Priority 2: Executable directory (same folder as exe when frozen)
+                if not dll_loaded:
+                    if getattr(sys, 'frozen', False):
+                        # Running as exe - get exe directory
+                        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+                        exe_dir_path = os.path.join(exe_dir, "libzkfp.dll")
+                    else:
+                        # Running as script - get script directory  
+                        exe_dir = os.path.dirname(os.path.abspath(__file__))
+                        exe_dir_path = os.path.join(exe_dir, "libzkfp.dll")
+                    
+                    searched_paths.append(f"2. Executable dir: {exe_dir_path}")
+                    if os.path.exists(exe_dir_path):
+                        try:
+                            # Use absolute path and CDLL for better compatibility with frozen exe
+                            abs_exe_dir_path = os.path.abspath(exe_dir_path)
+                            self.zkfp = ctypes.CDLL(abs_exe_dir_path)
+                            logger.info(f"✅ Loaded DLL from executable directory: {abs_exe_dir_path}")
+                            dll_loaded = True
+                        except Exception as e:
+                            logger.warning(f"Failed to load from executable directory: {e}")
+                
+                # Priority 3: Current working directory
+                if not dll_loaded:
+                    current_dir_path = os.path.join(os.getcwd(), "libzkfp.dll")
+                    searched_paths.append(f"3. Current dir: {current_dir_path}")
+                    if os.path.exists(current_dir_path):
+                        try:
+                            abs_current_path = os.path.abspath(current_dir_path)
+                            self.zkfp = ctypes.CDLL(abs_current_path)
+                            logger.info(f"✅ Loaded DLL from current directory: {abs_current_path}")
+                            dll_loaded = True
+                        except Exception as e:
+                            logger.warning(f"Failed to load from current directory: {e}")
+                
+                # Priority 4: Use SCANNER_CONFIG['dll_path'] (fallback)
                 if not dll_loaded:
                     dll_path = SCANNER_CONFIG.get("dll_path", "libzkfp.dll")
+                    searched_paths.append(f"4. Config path: {dll_path}")
                     try:
-                        self.zkfp = ctypes.windll.LoadLibrary(SCANNER_CONFIG['dll_path'])
-                        logger.info(f"✅ Loaded DLL using SCANNER_CONFIG: {dll_path}")
+                        # Try windll first (original method)
+                        self.zkfp = ctypes.windll.LoadLibrary(dll_path)
+                        logger.info(f"✅ Loaded DLL using SCANNER_CONFIG (windll): {dll_path}")
                         dll_loaded = True
-                    except Exception as e:
-                        logger.warning(f"Failed to load using SCANNER_CONFIG: {e}")
+                    except Exception as e1:
+                        try:
+                            # Try CDLL as fallback
+                            self.zkfp = ctypes.CDLL(dll_path)
+                            logger.info(f"✅ Loaded DLL using SCANNER_CONFIG (CDLL): {dll_path}")
+                            dll_loaded = True
+                        except Exception as e2:
+                            logger.warning(f"Failed to load using SCANNER_CONFIG (windll): {e1}")
+                            logger.warning(f"Failed to load using SCANNER_CONFIG (CDLL): {e2}")
                 
                 if not dll_loaded:
+                    logger.error("❌ Could not load libzkfp.dll from any location")
+                    logger.error("📁 Searched locations:")
+                    for path in searched_paths:
+                        logger.error(f"   {path}")
+                    logger.error(f"🔍 Debug info:")
+                    logger.error(f"   - sys.frozen: {getattr(sys, 'frozen', False)}")
+                    logger.error(f"   - sys.executable: {sys.executable}")
+                    logger.error(f"   - __file__: {__file__}")
+                    logger.error(f"   - os.getcwd(): {os.getcwd()}")
                     raise Exception("Could not load libzkfp.dll from any location")
 
             except Exception as e:
-                error_msg = str(e)
-                if "193" in error_msg or "not a valid Win32 application" in error_msg or "architecture mismatch" in error_msg.lower():
-                    import platform
-                    python_arch = platform.architecture()[0]
-                    logger.error("=" * 60)
-                    logger.error("❌ DLL ARCHITECTURE MISMATCH DETECTED!")
-                    logger.error("=" * 60)
-                    logger.error(f"Current Python: {python_arch}")
-                    logger.error(f"Current DLL: 32-bit (libzkfp.dll)")
-                    logger.error("")
-                    logger.error("🔧 SOLUTIONS:")
-                    logger.error("1. Get 64-bit libzkfp.dll from ZKTeco SDK")
-                    logger.error("2. Install 32-bit Python to match the 32-bit DLL")
-                    logger.error("3. Contact ZKTeco for 64-bit SDK support")
-                    logger.error("=" * 60)
-                    if self.ui_logger:
-                        self.ui_logger.error("❌ DLL Architecture Mismatch - Need 64-bit libzkfp.dll")
-                else:
-                    logger.error(f"Không thể load DLL: {e}")
+                logger.error(f"Không thể load DLL: {e}")
                 return False
 
             
             # Khai báo hàm
             self._declare_functions()
             
-            # Khởi tạo SDK
-            if self.zkfp.ZKFPM_Init() != 0:
-                logger.error("Không thể khởi tạo SDK máy quét vân tay")
+            # Khởi tạo SDK với retry logic
+            init_attempts = 3
+            for attempt in range(init_attempts):
+                try:
+                    init_result = self.zkfp.ZKFPM_Init()
+                    if init_result == 0:
+                        break
+                    else:
+                        logger.warning(f"SDK Init attempt {attempt + 1} failed with code: {init_result}")
+                        if attempt < init_attempts - 1:
+                            time.sleep(0.5)  # Wait before retry
+                            # Try terminate and re-init
+                            try:
+                                self.zkfp.ZKFPM_Terminate()
+                            except:
+                                pass
+                            time.sleep(0.3)
+                except Exception as e:
+                    logger.warning(f"SDK Init attempt {attempt + 1} exception: {e}")
+                    if attempt < init_attempts - 1:
+                        time.sleep(0.5)
+            else:
+                logger.error("Không thể khởi tạo SDK máy quét vân tay sau 3 lần thử")
                 return False
             
             # Kiểm tra số thiết bị
@@ -367,23 +390,57 @@ class FingerprintScanner:
         return True
     
     def _cleanup(self):
-        """Dọn dẹp tài nguyên"""
-        if self.hDBCache:
-            self.zkfp.ZKFPM_DBFree(self.hDBCache)
-            self.hDBCache = None
-            
-        if self.handle:
-            self.zkfp.ZKFPM_CloseDevice(self.handle)
-            self.handle = None
-            
-        if self.zkfp:
-            self.zkfp.ZKFPM_Terminate()
+        """Dọn dẹp tài nguyên với error handling"""
+        try:
+            if self.hDBCache and self.zkfp:
+                try:
+                    self.zkfp.ZKFPM_DBFree(self.hDBCache)
+                except Exception as e:
+                    logger.warning(f"Error freeing DB cache: {e}")
+                self.hDBCache = None
+                
+            if self.handle and self.zkfp:
+                try:
+                    self.zkfp.ZKFPM_CloseDevice(self.handle)
+                except Exception as e:
+                    logger.warning(f"Error closing device: {e}")
+                self.handle = None
+                
+            if self.zkfp:
+                try:
+                    self.zkfp.ZKFPM_Terminate()
+                except Exception as e:
+                    logger.warning(f"Error terminating SDK: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Error during cleanup: {e}")
+        
+        # Reset all state
+        self.is_connected = False
+        self.hDBCache = None
+        self.handle = None
     
     def capture_fingerprint(self, finger_index: int, scan_number: int = 1) -> Optional[bytes]:
         """Capture fingerprint once with optimized performance"""
         if not self.is_connected or not self.zkfp or not self.handle:
             logger.error("Scanner not connected")
             return None
+            
+        # Verify scanner is still responsive before capture
+        try:
+            device_count = self.zkfp.ZKFPM_GetDeviceCount()
+            if device_count == 0:
+                logger.warning("Scanner disconnected during operation, attempting reconnection...")
+                self.is_connected = False
+                if not self.connect():
+                    logger.error("Failed to reconnect scanner")
+                    return None
+        except Exception as e:
+            logger.warning(f"Scanner health check failed: {e}, attempting reconnection...")
+            self.is_connected = False
+            if not self.connect():
+                logger.error("Failed to reconnect scanner")
+                return None
             
         try:
             # Pre-allocate buffers for better performance
