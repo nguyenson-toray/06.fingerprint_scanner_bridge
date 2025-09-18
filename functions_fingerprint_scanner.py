@@ -24,6 +24,34 @@ FINGERPRINT_CONFIG = {
     'template_size': 2048
 }
 
+# Error codes for compact logging
+ERROR_CODES = {
+    # Connection errors (1xxx)
+    1001: "DLL_NOT_FOUND",
+    1002: "SDK_INIT_FAILED",
+    1003: "NO_DEVICE_FOUND",
+    1004: "DEVICE_OPEN_FAILED",
+    1005: "DB_CACHE_FAILED",
+    1006: "DEVICE_DISCONNECTED",
+
+    # Scan errors (2xxx)
+    2001: "SCAN_TIMEOUT",
+    2002: "SCAN_ERROR",
+    2003: "QUALITY_LOW",
+    2004: "TEMPLATE_INVALID",
+
+    # Process errors (3xxx)
+    3001: "MERGE_FAILED",
+    3002: "BUFFER_OVERFLOW",
+    3003: "INVALID_FINGER_INDEX",
+
+    # Success codes (1-4)
+    1: "CONNECTED",
+    2: "SCAN_SUCCESS",
+    3: "ENROLLMENT_COMPLETE",
+    4: "DISCONNECTED"
+}
+
 class TZKFPCapParams(ctypes.Structure):
     """Cấu trúc tham số quét vân tay"""
     _fields_ = [
@@ -53,65 +81,42 @@ class FingerprintScanner:
         else:
             print(message)
     
-    def _log_scan_attempt(self, attempt_number, total_attempts, status="waiting", message=""):
-        """Log scan attempt with colored indicators"""
-        # Color codes for console output
-        colors = {
-            "green": "\033[92m",  # Bright green
-            "red": "\033[91m",    # Bright red  
-            "yellow": "\033[93m", # Bright yellow
-            "blue": "\033[94m",   # Bright blue
-            "cyan": "\033[96m",   # Bright cyan
-            "reset": "\033[0m"    # Reset color
+    def _log_scan_attempt(self, attempt_number, total_attempts, status="waiting", error_code=None, extra_data=None):
+        """Optimized scan attempt logging with error codes"""
+        # Map status to error codes
+        status_codes = {
+            "success": 2,
+            "failure": 2001,
+            "waiting": None,
+            "in_progress": None
         }
-        
-        # Choose color based on status
-        if status == "success":
-            color = colors["green"]
-            icon = "✅"
-            status_text = "OK"
-        elif status == "failure":
-            color = colors["red"]
-            icon = "❌"
-            status_text = "FAIL"
-        elif status == "waiting":
-            color = colors["cyan"]
-            icon = "⏳"
-            status_text = "WAITING"
-        elif status == "in_progress":
-            color = colors["yellow"]
-            icon = "🔄"
-            status_text = "SCANNING"
-        else:
-            color = colors["blue"]
-            icon = "🔵"
-            status_text = "INFO"
-        
-        # Large attempt number display
-        attempt_display = f"{color}{'='*50}{colors['reset']}\n"
-        attempt_display += f"{color}{'':>15}LẦN {attempt_number}/{total_attempts} - {status_text}{colors['reset']}\n"
-        attempt_display += f"{color}{'='*50}{colors['reset']}"
-        
+
+        code = error_code or status_codes.get(status)
+
         if self.ui_logger:
-            # For UI logger, send structured data
-            self.ui_logger.info({
-                "type": "scan_attempt",
+            # Send compact structured data
+            log_data = {
+                "type": "scan",
                 "attempt": attempt_number,
                 "total": total_attempts,
                 "status": status,
-                "message": message,
-                "display": f"{icon} LẦN {attempt_number} {status_text}"
-            })
+                "code": code
+            }
+            if extra_data:
+                log_data.update(extra_data)
+            self.ui_logger.info(log_data)
+
+        # Minimal console output
+        if code:
+            print(f"[{attempt_number}/{total_attempts}] {code}: {ERROR_CODES.get(code, 'UNKNOWN')}")
         else:
-            print(attempt_display)
-            if message:
-                print(f"{color}{icon} {message}{colors['reset']}")
-        
-        # Always log to standard logger as well
-        logger.info(f"Scan attempt {attempt_number}/{total_attempts} - {status}: {message}")
-        
-        # Small delay to ensure logs are processed in order
-        time.sleep(0.1)
+            print(f"[{attempt_number}/{total_attempts}] {status.upper()}")
+
+        # Compact logger entry
+        if code:
+            logger.info(f"S{attempt_number}/{total_attempts}:{code}")
+        else:
+            logger.info(f"S{attempt_number}/{total_attempts}:{status}")
     
     def _calculate_quality_score(self, template_data: bytes) -> int:
         """Calculate simple quality score based on template size and data density"""
@@ -133,41 +138,19 @@ class FingerprintScanner:
         return min(quality_score, 100)  # Cap at 100
     
     def _log_enrollment_summary(self, finger_name, templates, final_template, final_quality):
-        """Display enrollment summary with all scan results"""
-        colors = {
-            "green": "\033[92m",
-            "cyan": "\033[96m", 
-            "yellow": "\033[93m",
-            "reset": "\033[0m"
-        }
-        
-        summary = f"\n{colors['cyan']}{'='*60}{colors['reset']}\n"
-        summary += f"{colors['cyan']}🎉 ENROLLMENT COMPLETED: {finger_name}{colors['reset']}\n"
-        summary += f"{colors['cyan']}{'='*60}{colors['reset']}\n"
-        
-        # Show results for each scan
-        for i, template in enumerate(templates, 1):
-            quality = self._calculate_quality_score(template)
-            status_color = colors["green"] if quality >= 70 else colors["yellow"]
-            summary += f"{status_color}✅ LẦN {i}: Quality {quality}% ({len(template)} bytes){colors['reset']}\n"
-        
-        summary += f"{colors['cyan']}-{colors['reset']}" * 60 + "\n"
-        summary += f"{colors['green']}🏆 FINAL: Quality {final_quality}% ({len(final_template)} bytes){colors['reset']}\n"
-        summary += f"{colors['cyan']}{'='*60}{colors['reset']}"
-        
+        """Compact enrollment summary with error codes"""
         if self.ui_logger:
             self.ui_logger.info({
-                "type": "enrollment_complete",
-                "finger_name": finger_name,
-                "scans": [{"attempt": i+1, "quality": self._calculate_quality_score(t), "size": len(t)} 
-                         for i, t in enumerate(templates)],
-                "final_quality": final_quality,
-                "final_size": len(final_template)
+                "type": "enrollment",
+                "finger": finger_name,
+                "scans": len(templates),
+                "quality": final_quality,
+                "size": len(final_template),
+                "code": 3
             })
-        else:
-            print(summary)
-        
-        logger.info(f"Enrollment completed for {finger_name}: {len(templates)} scans, final quality {final_quality}%")
+
+        print(f"ENROLLMENT COMPLETE: {finger_name} Q:{final_quality}% S:{len(final_template)}")
+        logger.info(f"E:{finger_name}:{final_quality}:{len(final_template)}:3")
         
 
     def connect(self) -> bool:
@@ -194,7 +177,7 @@ class FingerprintScanner:
                 if os.path.exists(syswow64_path):
                     try:
                         self.zkfp = ctypes.CDLL(syswow64_path)
-                        logger.info(f"✅ Loaded DLL from SysWOW64: {syswow64_path}")
+                        logger.info(f"DLL:SysWOW64:{syswow64_path}")
                         dll_loaded = True
                     except Exception as e:
                         logger.warning(f"Failed to load from SysWOW64: {e}")
@@ -216,7 +199,7 @@ class FingerprintScanner:
                             # Use absolute path and CDLL for better compatibility with frozen exe
                             abs_exe_dir_path = os.path.abspath(exe_dir_path)
                             self.zkfp = ctypes.CDLL(abs_exe_dir_path)
-                            logger.info(f"✅ Loaded DLL from executable directory: {abs_exe_dir_path}")
+                            logger.info(f"DLL:ExeDir:{abs_exe_dir_path}")
                             dll_loaded = True
                         except Exception as e:
                             logger.warning(f"Failed to load from executable directory: {e}")
@@ -229,7 +212,7 @@ class FingerprintScanner:
                         try:
                             abs_current_path = os.path.abspath(current_dir_path)
                             self.zkfp = ctypes.CDLL(abs_current_path)
-                            logger.info(f"✅ Loaded DLL from current directory: {abs_current_path}")
+                            logger.info(f"DLL:CurDir:{abs_current_path}")
                             dll_loaded = True
                         except Exception as e:
                             logger.warning(f"Failed to load from current directory: {e}")
@@ -241,13 +224,13 @@ class FingerprintScanner:
                     try:
                         # Try windll first (original method)
                         self.zkfp = ctypes.windll.LoadLibrary(dll_path)
-                        logger.info(f"✅ Loaded DLL using SCANNER_CONFIG (windll): {dll_path}")
+                        logger.info(f"DLL:Config:windll:{dll_path}")
                         dll_loaded = True
                     except Exception as e1:
                         try:
                             # Try CDLL as fallback
                             self.zkfp = ctypes.CDLL(dll_path)
-                            logger.info(f"✅ Loaded DLL using SCANNER_CONFIG (CDLL): {dll_path}")
+                            logger.info(f"DLL:Config:CDLL:{dll_path}")
                             dll_loaded = True
                         except Exception as e2:
                             logger.warning(f"Failed to load using SCANNER_CONFIG (windll): {e1}")
@@ -266,7 +249,7 @@ class FingerprintScanner:
                     raise Exception("Could not load libzkfp.dll from any location")
 
             except Exception as e:
-                logger.error(f"Không thể load DLL: {e}")
+                logger.error(f"DLL:ERR:{str(e)[:50]}")
                 return False
 
             
@@ -295,20 +278,20 @@ class FingerprintScanner:
                     if attempt < init_attempts - 1:
                         time.sleep(0.5)
             else:
-                logger.error("Không thể khởi tạo SDK máy quét vân tay sau 3 lần thử")
+                logger.error("SDK:INIT:FAIL:1002")
                 return False
             
             # Kiểm tra số thiết bị
             device_count = self.zkfp.ZKFPM_GetDeviceCount()
             if device_count == 0:
-                logger.error("Không tìm thấy thiết bị quét vân tay nào")
+                logger.error("DEV:NOT_FOUND:1003")
                 self.zkfp.ZKFPM_Terminate()
                 return False
             
             # Mở thiết bị đầu tiên
             self.handle = self.zkfp.ZKFPM_OpenDevice(0)
             if not self.handle:
-                logger.error("Không thể mở thiết bị quét")
+                logger.error("DEV:OPEN:FAIL:1004")
                 self.zkfp.ZKFPM_Terminate()
                 return False
             
@@ -321,17 +304,17 @@ class FingerprintScanner:
             # Khởi tạo DB Cache cho merge
             self.hDBCache = self.zkfp.ZKFPM_DBInit()
             if not self.hDBCache:
-                logger.error("Không thể khởi tạo bộ đệm DB để merge vân tay")
+                logger.error("DB:CACHE:FAIL:1005")
                 self.zkfp.ZKFPM_CloseDevice(self.handle)
                 self.zkfp.ZKFPM_Terminate()
                 return False
             
             self.is_connected = True
-            logger.info(f"✅ Scanner connected: {self.img_width}x{self.img_height}")
+            logger.info(f"CONN:{self.img_width}x{self.img_height}:1")
             return True
             
         except Exception as e:
-            logger.error(f"Lỗi khi khởi tạo hoặc kết nối scanner: {e}")
+            logger.error(f"CONN:ERR:{str(e)[:50]}")
             self._cleanup()
             return False
     
@@ -382,10 +365,10 @@ class FingerprintScanner:
             try:
                 self._cleanup()
                 self.is_connected = False
-                logger.info("✅ Scanner disconnected")
+                logger.info("DISC:4")
                 return True
             except Exception as e:
-                logger.error(f"Lỗi khi ngắt kết nối scanner: {e}")
+                logger.error(f"DISC:ERR:{str(e)[:50]}")
                 return False
         return True
     
@@ -423,7 +406,7 @@ class FingerprintScanner:
     def capture_fingerprint(self, finger_index: int, scan_number: int = 1) -> Optional[bytes]:
         """Capture fingerprint once with optimized performance"""
         if not self.is_connected or not self.zkfp or not self.handle:
-            logger.error("Scanner not connected")
+            logger.error("SCAN:NO_CONN:1006")
             return None
             
         # Verify scanner is still responsive before capture
@@ -433,13 +416,13 @@ class FingerprintScanner:
                 logger.warning("Scanner disconnected during operation, attempting reconnection...")
                 self.is_connected = False
                 if not self.connect():
-                    logger.error("Failed to reconnect scanner")
+                    logger.error("RECONN:FAIL:1006")
                     return None
         except Exception as e:
             logger.warning(f"Scanner health check failed: {e}, attempting reconnection...")
             self.is_connected = False
             if not self.connect():
-                logger.error("Failed to reconnect scanner")
+                logger.error("RECONN:FAIL:1006")
                 return None
             
         try:
@@ -449,17 +432,21 @@ class FingerprintScanner:
             template_len = ctypes.c_uint(self.template_buf_size)
             
             start_time = time.time()
-            timeout = SCANNER_CONFIG.get('timeout', 20)  # Reduced timeout for faster response
+            timeout = SCANNER_CONFIG.get('timeout', 30)  # Use config timeout
             
-            # Show WAITING status BEFORE user places finger
-            self._log_scan_attempt(scan_number, self.merge_count, "waiting", 
-                                 f"Ready for scan {scan_number} - Please place finger on scanner now")
+            # Show WAITING status BEFORE user places finger (for all scans)
+            self._log_scan_attempt(scan_number, self.merge_count, "waiting")
+
+            # Ensure waiting message is always visible for all scans
+            if scan_number == 1:
+                time.sleep(0.2)  # Normal delay for first scan
+            elif scan_number == 2:
+                time.sleep(0.5)  # Longer delay for second scan to ensure visibility
+            else:  # scan_number == 3
+                time.sleep(0.5)  # Longer delay for final scan
             
-            # Small delay to ensure log is captured by frontend polling
-            time.sleep(0.3)
-            
-            # Optimized polling interval
-            poll_interval = 0.05  # Reduced from 0.1 to 0.05 for faster response
+            # Optimized polling interval for faster response
+            poll_interval = 0.03  # Further reduced for better performance
             
             while time.time() - start_time < timeout:
                 ret = self.zkfp.ZKFPM_AcquireFingerprint(
@@ -473,66 +460,72 @@ class FingerprintScanner:
                 if ret == 0:
                     template_data = bytes(template_buf[:template_len.value])
                     quality_score = self._calculate_quality_score(template_data)
-                    
-                    # Log successful scan with green color and quality score
-                    self._log_scan_attempt(scan_number, self.merge_count, "success", 
-                                         f"OK - Quality: {quality_score}% ({len(template_data)} bytes)")
+
+                    # Log successful scan with quality data - make it more visible
+                    self._log_scan_attempt(scan_number, self.merge_count, "success",
+                                         2, {"quality": quality_score, "size": len(template_data)})
+
+                    # Add a clear success message
+                    self._log(f"✅ LẦN {scan_number} QUÉT THÀNH CÔNG! (Quality: {quality_score}%)")
+
+                    # Extra delay for scan 3 to ensure success message is processed
+                    if scan_number == 3:
+                        time.sleep(0.3)
+
                     return template_data
                     
                 time.sleep(poll_interval)
             
-            # Log timeout failure with red color
-            self._log_scan_attempt(scan_number, self.merge_count, "failure", 
-                                 f"FAIL - Timeout after {timeout}s")
+            # Log timeout failure
+            self._log_scan_attempt(scan_number, self.merge_count, "failure", 2001)
             return None
             
         except Exception as e:
-            # Log exception failure with red color
-            self._log_scan_attempt(scan_number, self.merge_count, "failure", 
-                                 f"FAIL - Error: {str(e)}")
-            logger.error(f"Error capturing fingerprint: {str(e)}")
+            # Log exception failure
+            self._log_scan_attempt(scan_number, self.merge_count, "failure", 2002)
+            logger.error(f"CF:{str(e)}")
             return None
     
     def enroll_fingerprint(self, finger_index: int) -> Optional[bytes]:
         """Enroll fingerprint with optimized 3-scan process"""
         if not self.is_connected or not self.zkfp or not self.handle:
-            logger.error("Scanner not connected")
+            logger.error("ENROLL:NO_CONN:1006")
             return None
             
         if not self.hDBCache:
-            logger.error("DB Cache not initialized")
+            logger.error("ENROLL:NO_CACHE:1005")
             return None
             
         collected_templates = []
         finger_name = get_finger_name(finger_index)
         
-        self._log(f"👆 Starting enrollment for {finger_name} (Index: {finger_index})")
-        self._log(f"📋 This process requires 3 fingerprint scans for optimal quality")
-        
-        # Show LẦN 1 WAITING immediately so user knows what to expect
-        self._log_scan_attempt(1, self.merge_count, "waiting", 
-                             "Get ready for first scan - Please prepare finger")
-        
-        # Small delay to ensure frontend log polling is active
-        time.sleep(0.5)
+        self._log(f"🔄 Starting fingerprint enrollment process...")
+        self._log(f"ENROLL:{finger_name}:{finger_index}")
+
+        # Let capture_fingerprint handle all waiting messages
+
+        # Minimal delay for UI synchronization
+        time.sleep(0.1)
         
         # Collect 3 fingerprint samples with optimized timing
         for i in range(self.merge_count):
-            self._log(f"\n📷 Now collecting scan {i+1}/{self.merge_count} for {finger_name}")
             
             template = self.capture_fingerprint(finger_index, i+1)
             if not template:
                 return None
             
             collected_templates.append(template)
-            
+
             if i < self.merge_count - 1:
-                self._log("👆 Lift finger and prepare for next scan in 2 seconds...")
-                time.sleep(2)  # Give user time to lift and reposition finger
+                # Small delay to let success message display first
+                time.sleep(0.3)
+                self._log(f"✅ Sẵn sàng cho lần quét {i+2}/3")
+                self._log("📋 Vui lòng nhấc tay ra, sau đó đặt lại khi thấy thông báo ĐANG ĐỢI QUÉT")
+                time.sleep(1.5)  # Longer wait time to ensure user sees the waiting message
         
         # Merge templates with error handling
         try:
-            self._log("🔄 Processing and merging templates...")
+            self._log("MERGE:START")
             
             # Pre-allocate merge buffer
             merged_template_buf = (ctypes.c_ubyte * self.template_buf_size)()
@@ -562,12 +555,12 @@ class FingerprintScanner:
                 self._log_enrollment_summary(finger_name, collected_templates, final_template_data, final_quality)
                 return final_template_data
             else:
-                self._log(f"❌ Template merge failed (Error: {ret_merge})", "error")
+                self._log(f"Merge failed: {ret_merge}", "error")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error merging fingerprint templates: {str(e)}")
-            self._log(f"❌ Merge process failed: {str(e)}", "error")
+            logger.error(f"M:{str(e)}")
+            self._log(f"Merge error: {str(e)}", "error")
             return None
 
 def get_finger_name(finger_index):

@@ -18,7 +18,7 @@ import sys
 import os
 
 # Import scanner module
-from functions_fingerprint_scanner import FingerprintScanner, SCANNER_CONFIG, get_finger_name
+from functions_fingerprint_scanner import FingerprintScanner, SCANNER_CONFIG, get_finger_name, ERROR_CODES
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,63 +32,60 @@ CORS(app)  # Enable CORS for web browser access
 scanner = None
 scanner_status = {"connected": False, "device_info": "Not connected"}
 
-# Global log storage
+# Optimized log storage
 app_logs = []
-MAX_LOGS = 100
+MAX_LOGS = 50  # Reduced for better performance
 
 class DesktopBridgeLogger:
-    """Custom logger để capture logs cho web UI"""
-    
+    """Optimized logger with error codes"""
+
     @staticmethod
     def log(level, message):
-        """Add log entry"""
-        import time
-        import sys
+        """Add compact log entry"""
         timestamp = time.strftime("%H:%M:%S")
+
+        # Compact message format
+        if isinstance(message, str) and len(message) > 100:
+            message = message[:97] + "..."
+
         log_entry = {
             "timestamp": timestamp,
             "level": level,
             "message": message
         }
         app_logs.append(log_entry)
-        
+
         # Keep only latest logs
         if len(app_logs) > MAX_LOGS:
             app_logs.pop(0)
-        
-        # Also log to console with immediate flush (if console available)
+
+        # Minimal console output
         try:
-            print(f"[{timestamp}] {level.upper()}: {message}")
-            if sys.stdout:
-                sys.stdout.flush()  # Force immediate output
+            print(f"[{timestamp}] {level}: {message}")
         except (AttributeError, OSError):
-            # No console available (windowed exe), skip console output
             pass
     
     @staticmethod
     def info(message):
         # Handle structured data from scanner
         if isinstance(message, dict):
-            if message.get("type") == "scan_attempt":
+            msg_type = message.get("type")
+            if msg_type == "scan":
                 attempt = message.get("attempt")
                 total = message.get("total")
                 status = message.get("status")
-                display = message.get("display", f"LẦN {attempt}")
-                scan_message = message.get("message", "")
-                
-                # Log the large attempt number
-                DesktopBridgeLogger.log("info", f"{display}")
-                if scan_message:
-                    DesktopBridgeLogger.log(status, scan_message)
-            elif message.get("type") == "enrollment_complete":
-                finger_name = message.get("finger_name")
-                scans = message.get("scans", [])
-                final_quality = message.get("final_quality", 0)
-                
-                DesktopBridgeLogger.log("success", f"🎉 ENROLLMENT COMPLETED: {finger_name}")
-                for scan in scans:
-                    DesktopBridgeLogger.log("success", f"✅ LẦN {scan['attempt']}: Quality {scan['quality']}% ({scan['size']} bytes)")
-                DesktopBridgeLogger.log("success", f"🏆 FINAL QUALITY: {final_quality}%")
+                code = message.get("code")
+
+                if code:
+                    DesktopBridgeLogger.log("info", f"S{attempt}/{total}:{code}")
+                else:
+                    DesktopBridgeLogger.log("info", f"S{attempt}/{total}:{status}")
+
+            elif msg_type == "enrollment":
+                finger = message.get("finger")
+                quality = message.get("quality")
+                code = message.get("code")
+                DesktopBridgeLogger.log("success", f"E:{finger}:Q{quality}:{code}")
             else:
                 DesktopBridgeLogger.log("info", str(message))
         else:
@@ -120,12 +117,12 @@ DESKTOP_CONFIG = {
 @app.route('/api/test', methods=['GET'])
 def test_connection():
     """Test API connection"""
-    DesktopBridgeLogger.info("API test connection requested")
+    DesktopBridgeLogger.info("API:TEST")
     return jsonify({
         "success": True,
-        "message": "Desktop Bridge API is running",
-        "version": "1.0.0",
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+        "message": "OK",
+        "version": "1.0.1",
+        "timestamp": time.strftime("%H:%M:%S")
     })
 
 @app.route('/api/logs', methods=['GET'])
@@ -142,10 +139,10 @@ def clear_logs():
     """Clear logs"""
     global app_logs
     app_logs = []
-    DesktopBridgeLogger.info("Logs cleared")
+    DesktopBridgeLogger.info("LOGS:CLEARED")
     return jsonify({
         "success": True,
-        "message": "Logs cleared successfully"
+        "message": "OK"
     })
 
 @app.route('/api/scanner/status', methods=['GET'])
@@ -182,7 +179,7 @@ def initialize_scanner():
     global scanner, scanner_status
     
     try:
-        DesktopBridgeLogger.info("Initializing scanner...")
+        DesktopBridgeLogger.info("INIT:START")
         scanner = FingerprintScanner(ui_logger=DesktopBridgeLogger)
         
         if scanner.connect():
@@ -191,7 +188,7 @@ def initialize_scanner():
                 "device_info": f"{SCANNER_CONFIG['model']} - USB Connected ({scanner.img_width}x{scanner.img_height})"
             }
             
-            DesktopBridgeLogger.success(f"Scanner connected: {scanner.img_width}x{scanner.img_height}")
+            DesktopBridgeLogger.success(f"INIT:OK:{scanner.img_width}x{scanner.img_height}")
             return jsonify({
                 "success": True,
                 "message": "Scanner initialized successfully",
@@ -203,14 +200,14 @@ def initialize_scanner():
                 "device_info": "Failed to connect"
             }
             
-            DesktopBridgeLogger.error("Failed to connect to scanner")
+            DesktopBridgeLogger.error("INIT:FAIL:1003")
             return jsonify({
                 "success": False,
                 "message": "Could not connect to scanner"
             })
             
     except Exception as e:
-        DesktopBridgeLogger.error(f"Error initializing scanner: {e}")
+        DesktopBridgeLogger.error(f"INIT:ERR:{str(e)[:50]}")
         return jsonify({
             "success": False,
             "message": f"Error initializing scanner: {str(e)}"
@@ -284,8 +281,7 @@ def test_fingerprint_enrollment():
             })
         
         finger_name = get_finger_name(finger_index)
-        DesktopBridgeLogger.info(f"🧪 TEST MODE: Starting 3-scan enrollment for {finger_name}")
-        DesktopBridgeLogger.info("This will demonstrate the 3-scan process with colored indicators")
+        DesktopBridgeLogger.info(f"TEST:START:{finger_name}:{finger_index}")
         
         # Perform enrollment with detailed logging
         template_data = scanner.enroll_fingerprint(finger_index)
@@ -310,7 +306,7 @@ def test_fingerprint_enrollment():
             })
             
     except Exception as e:
-        DesktopBridgeLogger.error(f"Test enrollment error: {e}")
+        DesktopBridgeLogger.error(f"TEST:ERR:{str(e)[:50]}")
         return jsonify({
             "success": False,
             "message": f"Test error: {str(e)}"
@@ -339,8 +335,7 @@ def capture_fingerprint():
             })
         
         finger_name = get_finger_name(finger_index)
-        DesktopBridgeLogger.info(f"Starting enrollment for employee {employee_id}, {finger_name} (Index: {finger_index})")
-        DesktopBridgeLogger.info("📷 This will require 3 fingerprint scans for optimal quality")
+        DesktopBridgeLogger.info(f"ENROLL:START:{employee_id}:{finger_name}:{finger_index}")
         
         # Capture fingerprint using 3-scan enrollment process
         template_data = scanner.enroll_fingerprint(finger_index)
@@ -352,7 +347,7 @@ def capture_fingerprint():
             # Calculate quality score
             quality_score = scanner._calculate_quality_score(template_data)
             
-            DesktopBridgeLogger.success(f"Fingerprint captured successfully: {len(template_data)} bytes, Quality: {quality_score}%")
+            DesktopBridgeLogger.success(f"ENROLL:OK:Q{quality_score}:S{len(template_data)}")
             
             return jsonify({
                 "success": True,
@@ -367,14 +362,14 @@ def capture_fingerprint():
             logger.error("Failed to capture fingerprint")
             return jsonify({
                 "success": False,
-                "message": "Failed to capture fingerprint. Please try again."
+                "message": "Capture failed"
             })
             
     except Exception as e:
         logger.error(f"Error capturing fingerprint: {e}")
         return jsonify({
             "success": False,
-            "message": f"Error capturing fingerprint: {str(e)}"
+            "message": f"Error: {str(e)[:50]}"
         })
 
 @app.route('/api/sync/attendance_device', methods=['POST'])
