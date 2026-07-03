@@ -1,5 +1,31 @@
 # Fingerprint Scanner Bridge Application
 
+## v2.0.0 (2026-07-03) — CHANGELOG
+
+**Chất lượng scan:**
+- Kiểm tra chéo giữa các lần quét bằng `ZKFPM_DBMatch` — lần quét 2/3 không khớp lần 1 (đổi ngón) → yêu cầu quét lại lần đó (code 2005)
+- Enforce quality threshold + min template size cho từng lần quét, retry theo từng lần (tối đa 2 retry/lần) thay vì hủy cả quy trình
+- Phát hiện nhấc tay: chờ sensor trống ≥0.6s trước lần quét kế tiếp → 3 mẫu đa dạng hơn, template merge tốt hơn
+- Cảnh báo trùng ngón trong phiên: template mới giống ngón đã quét trước đó trong cùng phiên → warning
+- Thống nhất mapping ngón tay với web UI: 0=Left Little … 4=Left Thumb, 5=Right Thumb … 9=Right Little
+
+**Tốc độ:**
+- Bỏ toàn bộ `time.sleep` chờ UI (~3–4s/lần đăng ký)
+- Session scanner bền: connect 1 lần khi mở dialog, giữ suốt phiên, tự disconnect sau 5 phút idle
+
+**Đồng bộ realtime với web UI:**
+- Capture dạng job: `POST /api/fingerprint/capture` trả `job_id` ngay, quét chạy background → hết lỗi timeout 30s
+- SSE `GET /api/events/<job_id>`: push event JSON structured (có `seq` chống mất/lặp message)
+- `GET /api/fingerprint/job/<id>` (fallback), `POST /api/fingerprint/cancel/<id>` (hủy quét)
+- `GET /api/version` để web UI kiểm tra phiên bản bridge
+
+**Bảo mật:**
+- CORS giới hạn origin (mặc định `erp.tiqn.com.vn`); tùy chỉnh qua `bridge_config.json` đặt cạnh exe (xem `bridge_config.json.example`)
+
+**Deploy:** build lại exe bằng `build_exe.bat` trên Windows rồi thay thế trên từng máy client. Web UI (fingerprint_scanner_dialog.js v2) tự nhận diện bridge cũ và fallback về flow cũ, nên có thể cập nhật dần từng máy.
+
+---
+
 ## Mô tả
 Ứng dụng cầu nối (Bridge Application) chạy trên máy tính user để kết nối giữa ERPNext Web UI và máy quét vân tay ZKTeco. Ứng dụng hoạt động như một HTTP Server cục bộ, cho phép ERPNext Web giao tiếp với thiết bị quét vân tay thông qua API REST.
 

@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy this file to bridge_config.json (same folder as the exe) to override defaults. Use [\"*\"] in allowed_origins to disable the CORS restriction (not recommended).",
+  "allowed_origins": [
+    "https://erp.tiqn.com.vn",
+    "https://erp.tiqn.com.vn:8888",
+    "https://erp.tiqn.local",
+    "https://erp.tiqn.local:8888"
+  ],
+  "port": 8080,
+  "idle_disconnect_seconds": 300
+}
